@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Paper Reader</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body, #root { height: 100%; width: 100%; overflow: hidden; }
+  body { background: #080a16; color: #e2e8f0; font-family: 'DM Sans', system-ui, sans-serif; }
+  input, button { font-family: inherit; }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(99,102,241,0.3); border-radius: 2px; }
+  @keyframes kp { 0%,80%,100% { opacity:.2; transform:scale(.8); } 40% { opacity:1; transform:scale(1); } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ── arXiv resolution ──────────────────────────────────────────────────────────
+function resolveInput(raw) {
+const s = raw.trim();
+if (/^\d{4}.\d{4,5}$/.test(s) || /^[a-z-]+/\d{7}$/.test(s))
+return { pdfUrl: `https://arxiv.org/pdf/${s}`, arxivId: s };
+const idMatch = s.match(/arxiv[:\s]+([^\s]+)/i);
+if (idMatch) return { pdfUrl: `https://arxiv.org/pdf/${idMatch[1]}`, arxivId: idMatch[1] };
+const absMatch = s.match(/arxiv.org/abs/([^\s?#]+)/i);
+if (absMatch) return { pdfUrl: `https://arxiv.org/pdf/${absMatch[1]}`, arxivId: absMatch[1] };
+const pdfMatch = s.match(/arxiv.org/pdf/([^\s?#]+)/i);
+if (pdfMatch) return { pdfUrl: `https://arxiv.org/pdf/${pdfMatch[1]}`, arxivId: pdfMatch[1] };
+if (s.startsWith(“http”)) return { pdfUrl: s, arxivId: null };
+return null;
+}
+
+const PROXIES = [
+u => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
+u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+u => `https://thingproxy.freeboard.io/fetch/${u}`,
+];
+
+async function fetchPdfWithFallback(pdfUrl, onStatus) {
+for (let i = 0; i < PROXIES.length; i++) {
+const url = PROXIES[i](pdfUrl);
+onStatus(`Trying proxy ${i + 1} of ${PROXIES.length}…`);
+try {
+const r = await fetch(url, { signal: AbortSignal.timeout(15000) });
+if (!r.ok) continue;
+const buf = await r.arrayBuffer();
+if (buf.byteLength < 1000) continue;
+// Verify it looks like a PDF
+const header = new Uint8Array(buf.slice(0, 5));
+const isPdf = String.fromCharCode(…header) === “%PDF-”;
+if (!isPdf) continue;
+return buf;
+} catch { /* try next */ }
+}
+throw new Error(“All proxies failed”);
+}
+
+// ── PDF text extraction ───────────────────────────────────────────────────────
+async function extractPdfText(pdfDoc, maxChars = 24000) {
+let text = “”;
+for (let p = 1; p <= pdfDoc.numPages && text.length < maxChars; p++) {
+const page = await pdfDoc.getPage(p);
+const content = await page.getTextContent();
+text += content.items.map(i => i.str).join(” “) + “\n\n”;
+}
+return text.slice(0, maxChars);
+}
+
+function buildSystemPrompt(text, meta) {
+return `You are an expert guide embedded in an interactive scientific paper reader. ${meta?.arxivId ? `Paper: arXiv:${meta.arxivId}`: meta?.title ?`Paper: “${meta.title}”` : “”}
+
+FULL PAPER TEXT (extracted):
+${text}
+
+Your role: help the reader navigate, understand, and engage with this paper.
+
+- Answer questions about content, methods, results, and significance
+- Point to specific sections or figures when relevant
+- Explain jargon at the level of a physics/astrophysics researcher
+- Be concise and precise
+- When asked to summarize, highlight key contributions and main results`;
+  }
+
+// ── Skim annotations for 2210.05140 ──────────────────────────────────────────
+const DEFAULT_ANNOTATIONS = [
+{ page: 1, xFrac: 0.52, yFrac: 0.09, color: “#60A5FA”, label: “The Pitch”,       text: “kNN for point ↔ field. Sequel to the 2021 point↔point paper.”, rotate: -1.5 },
+{ page: 1, xFrac: 0.02, yFrac: 0.76, color: “#34D399”, label: “20 Years of 2pt”, text: “Cross-correlations have been 2pt-only for two decades. This changes that.”, rotate: 1.2 },
+{ page: 2, xFrac: 0.52, yFrac: 0.22, color: “#C084FC”, label: “The Formalism”,   text: “kNN(tracer) ⊗ field smoothed at r₁…rₙ → all N-pt joint functions.”, rotate: -0.8 },
+{ page: 3, xFrac: 0.03, yFrac: 0.48, color: “#FBBF24”, label: “Gaussian Check”,  text: “Validated on Gaussian fields first. Clean isolation.”, rotate: 1.5 },
+{ page: 4, xFrac: 0.52, yFrac: 0.06, color: “#F87171”, label: “★ Money Result”,  text: “>5σ vs ~1σ from 2pt in high-noise. Show this to everyone.”, rotate: -1.2 },
+{ page: 5, xFrac: 0.03, yFrac: 0.52, color: “#FB923C”, label: “Applications”,    text: “Galaxy×CMB lensing, ν×LSS, X-ray×AGN — all benefit.”, rotate: 0.8 },
+{ page: 6, xFrac: 0.52, yFrac: 0.14, color: “#22D3EE”, label: “HEFT Works”,      text: “Same bias params as 2pt. No new free parameters. Clean.”, rotate: -0.5 },
+];
+
+// ── Components ────────────────────────────────────────────────────────────────
+function Callout({ xFrac, yFrac, color, label, text, rotate }) {
+return (
+<div style={{
+position: “absolute”, left: `${xFrac * 100}%`, top: `${yFrac * 100}%`,
+width: “155px”, background: “rgba(6,8,20,0.95)”,
+border: `1.5px solid ${color}`, borderRadius: “3px”,
+padding: “7px 9px 8px”, transform: `rotate(${rotate}deg)`,
+zIndex: 20, pointerEvents: “none”,
+boxShadow: `0 4px 20px rgba(0,0,0,0.7), 0 0 0 1px ${color}18`,
+}}>
+<div style={{ fontFamily: “‘Caveat’,cursive”, fontSize: “13px”, fontWeight: 700, color, marginBottom: “3px”, lineHeight: 1 }}>{label}</div>
+<div style={{ fontFamily: “‘Caveat’,cursive”, fontSize: “12px”, color: “rgba(210,220,255,0.85)”, lineHeight: “1.45” }}>{text}</div>
+</div>
+);
+}
+
+function PdfPage({ pdfDoc, pageNum, skimMode, annotations }) {
+const canvasRef = useRef(null);
+const annots = annotations.filter(a => a.page === pageNum);
+
+useEffect(() => {
+if (!pdfDoc || !canvasRef.current) return;
+let cancelled = false;
+pdfDoc.getPage(pageNum).then(page => {
+if (cancelled || !canvasRef.current) return;
+const vp = page.getViewport({ scale: 2.0 });
+const canvas = canvasRef.current;
+canvas.width = vp.width;
+canvas.height = vp.height;
+page.render({ canvasContext: canvas.getContext(“2d”), viewport: vp });
+});
+return () => { cancelled = true; };
+}, [pdfDoc, pageNum]);
+
+return (
+<div style={{ position: “relative”, width: “100%”, marginBottom: “24px” }}>
+<div style={{ fontSize: “10px”, color: “#374151”, textAlign: “center”, letterSpacing: “0.15em”, marginBottom: “5px”, fontFamily: “monospace” }}>
+— {pageNum} —
+</div>
+<div style={{ position: “relative” }}>
+<canvas ref={canvasRef} style={{
+width: “100%”, display: “block”, borderRadius: “2px”,
+filter: skimMode ? “brightness(0.38) saturate(0.08)” : “brightness(0.96)”,
+transition: “filter 0.4s ease”,
+}} />
+{skimMode && annots.map((a, i) => <Callout key={i} {…a} />)}
+</div>
+</div>
+);
+}
+
+function LoadScreen({ onLoad }) {
+const [urlInput, setUrlInput] = useState(“2210.05140”);
+const [status, setStatus] = useState(null);
+const [error, setError] = useState(null);
+const [dragging, setDragging] = useState(false);
+const fileRef = useRef(null);
+
+const loadFromBuffer = async (buf, meta = {}) => {
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+“https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js”;
+const doc = await pdfjsLib.getDocument({
+data: buf,
+cMapUrl: “https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/”,
+cMapPacked: true,
+}).promise;
+setStatus(“Extracting text for AI…”);
+const text = await extractPdfText(doc);
+const systemPrompt = buildSystemPrompt(text, meta);
+const annotations = meta.arxivId === “2210.05140” ? DEFAULT_ANNOTATIONS : [];
+onLoad({ doc, systemPrompt, annotations, meta });
+};
+
+const handleUrl = async () => {
+const resolved = resolveInput(urlInput);
+if (!resolved) { setError(“Try an arXiv ID like 2210.05140, an arXiv URL, or any PDF URL.”); return; }
+setError(null);
+try {
+const buf = await fetchPdfWithFallback(resolved.pdfUrl, setStatus);
+setStatus(“Parsing PDF…”);
+await loadFromBuffer(buf, { arxivId: resolved.arxivId, pdfUrl: resolved.pdfUrl });
+} catch {
+setStatus(null);
+setError(“All proxies failed. Use the file upload below — download the PDF first, then select it.”);
+}
+};
+
+const handleFile = async (file) => {
+if (!file || file.type !== “application/pdf”) { setError(“Please select a PDF file.”); return; }
+setError(null); setStatus(“Parsing PDF…”);
+try {
+const buf = await file.arrayBuffer();
+await loadFromBuffer(buf, { title: file.name.replace(/.pdf$/i, “”) });
+} catch { setError(“Failed to parse PDF.”); setStatus(null); }
+};
+
+return (
+<div style={{ display: “flex”, flexDirection: “column”, alignItems: “center”, justifyContent: “center”, height: “100%”, padding: “32px 24px”, textAlign: “center” }}>
+<div style={{ width: “48px”, height: “3px”, background: “linear-gradient(to right,#6366f1,#8b5cf6)”, borderRadius: “2px”, marginBottom: “28px” }} />
+<h2 style={{ fontSize: “18px”, fontWeight: 500, color: “#c7d2fe”, margin: “0 0 6px” }}>Open a Paper</h2>
+<p style={{ fontSize: “12px”, color: “#475569”, margin: “0 0 28px” }}>arXiv ID · abstract URL · PDF URL · or upload</p>
+
+```
+  <div style={{ width: "100%", maxWidth: "340px", marginBottom: "10px" }}>
+    <div style={{ display: "flex", gap: "8px" }}>
+      <input
+        value={urlInput}
+        onChange={e => { setUrlInput(e.target.value); setError(null); }}
+        onKeyDown={e => e.key === "Enter" && !status && handleUrl()}
+        placeholder="2210.05140 or URL…"
+        style={{ flex: 1, padding: "11px 16px", borderRadius: "10px", border: "1px solid rgba(99,102,241,0.35)", background: "rgba(12,15,36,0.9)", color: "#e2e8f0", fontSize: "15px", outline: "none" }}
+      />
+      <button
+        onClick={handleUrl}
+        disabled={!!status}
+        style={{ padding: "11px 18px", borderRadius: "10px", border: "none", background: status ? "#1e293b" : "linear-gradient(135deg,#4f46e5,#7c3aed)", color: "white", fontSize: "13px", cursor: status ? "not-allowed" : "pointer", fontWeight: 500 }}
+      >
+        {status ? "…" : "Load →"}
+      </button>
+    </div>
+    <div style={{ display: "flex", gap: "6px", marginTop: "8px", flexWrap: "wrap", justifyContent: "center" }}>
+      {["2210.05140", "arxiv.org/abs/…", "any PDF URL"].map(h => (
+        <span key={h} style={{ fontSize: "10px", color: "#374151", background: "rgba(99,102,241,0.08)", border: "1px solid rgba(99,102,241,0.15)", borderRadius: "4px", padding: "2px 7px", fontFamily: "monospace" }}>{h}</span>
+      ))}
+    </div>
+  </div>
+
+  {status && (
+    <div style={{ fontSize: "12px", color: "#818cf8", margin: "8px 0", display: "flex", alignItems: "center", gap: "8px" }}>
+      <div style={{ display: "flex", gap: "3px" }}>
+        {[0,1,2].map(i => <div key={i} style={{ width: "5px", height: "5px", borderRadius: "50%", background: "#6366f1", animation: `kp 1.2s ease ${i*0.2}s infinite` }} />)}
+      </div>
+      {status}
+    </div>
+  )}
+  {error && (
+    <div style={{ fontSize: "12px", color: "#f87171", maxWidth: "300px", margin: "8px 0", lineHeight: 1.6 }}>{error}</div>
+  )}
+
+  <div style={{ display: "flex", alignItems: "center", gap: "12px", margin: "20px 0", width: "100%", maxWidth: "340px" }}>
+    <div style={{ flex: 1, height: "1px", background: "rgba(99,102,241,0.15)" }} />
+    <span style={{ fontSize: "11px", color: "#374151" }}>or upload file</span>
+    <div style={{ flex: 1, height: "1px", background: "rgba(99,102,241,0.15)" }} />
+  </div>
+
+  <div
+    onClick={() => !status && fileRef.current?.click()}
+    onDragOver={e => { e.preventDefault(); setDragging(true); }}
+    onDragLeave={() => setDragging(false)}
+    onDrop={e => { e.preventDefault(); setDragging(false); handleFile(e.dataTransfer.files[0]); }}
+    style={{ width: "100%", maxWidth: "340px", border: `2px dashed ${dragging ? "#6366f1" : "rgba(99,102,241,0.25)"}`, borderRadius: "10px", padding: "28px 24px", cursor: status ? "wait" : "pointer", background: dragging ? "rgba(99,102,241,0.07)" : "rgba(12,15,36,0.4)", transition: "all 0.2s" }}
+  >
+    <div style={{ fontSize: "32px", marginBottom: "10px", opacity: 0.7 }}>📂</div>
+    <div style={{ fontSize: "13px", color: "#64748b" }}>Tap to select PDF from Files</div>
+    <div style={{ fontSize: "11px", color: "#334155", marginTop: "4px" }}>Works offline — no proxy needed</div>
+  </div>
+  <input ref={fileRef} type="file" accept="application/pdf" style={{ display: "none" }} onChange={e => handleFile(e.target.files[0])} />
+</div>
+```
+
+);
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+function App() {
+const [paper, setPaper] = useState(null);
+const [skimMode, setSkimMode] = useState(true);
+const [showChat, setShowChat] = useState(false);
+const [messages, setMessages] = useState([]);
+const [input, setInput] = useState(””);
+const [chatLoading, setChatLoading] = useState(false);
+const [isMobile, setIsMobile] = useState(window.innerWidth < 700);
+const chatEndRef = useRef(null);
+
+useEffect(() => {
+const h = () => setIsMobile(window.innerWidth < 700);
+window.addEventListener(“resize”, h);
+return () => window.removeEventListener(“resize”, h);
+}, []);
+
+const handlePaperLoaded = useCallback((p) => {
+setPaper(p);
+setMessages([{ role: “assistant”, content: `Paper loaded${p.meta?.arxivId ? ` (arXiv:${p.meta.arxivId})` : ""}. Ask me anything — key results, formalism, figures, or how it fits the literature.` }]);
+setShowChat(true);
+}, []);
+
+useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: “smooth” }); }, [messages, chatLoading]);
+
+const sendMessage = useCallback(async () => {
+if (!input.trim() || chatLoading || !paper) return;
+const userMsg = { role: “user”, content: input.trim() };
+const newMsgs = […messages, userMsg];
+setMessages(newMsgs); setInput(””); setChatLoading(true);
+try {
+const res = await fetch(“https://api.anthropic.com/v1/messages”, {
+method: “POST”,
+headers: { “Content-Type”: “application/json” },
+body: JSON.stringify({
+model: “claude-sonnet-4-20250514”,
+max_tokens: 1000,
+system: paper.systemPrompt,
+messages: newMsgs.map(m => ({ role: m.role, content: m.content })),
+}),
+});
+const data = await res.json();
+setMessages([…newMsgs, { role: “assistant”, content: data.content?.[0]?.text ?? “No response.” }]);
+} catch {
+setMessages([…newMsgs, { role: “assistant”, content: “Connection error. Please try again.” }]);
+}
+setChatLoading(false);
+}, [input, chatLoading, messages, paper]);
+
+const btn = (active, ac) => ({
+display: “flex”, alignItems: “center”, gap: “6px”,
+padding: “7px 12px”, borderRadius: “8px”, cursor: “pointer”,
+border: `1px solid ${active ? ac + "55" : "rgba(255,255,255,0.08)"}`,
+background: active ? ac + “1a” : “rgba(255,255,255,0.05)”,
+color: active ? ac : “#64748b”,
+fontSize: “12px”, fontWeight: 500, transition: “all 0.2s”, flexShrink: 0,
+});
+
+const chatPanel = paper && (
+<div style={{
+width: isMobile ? “100%” : “360px”, flexShrink: 0,
+display: “flex”, flexDirection: “column”,
+background: “rgba(6,8,20,0.97)”,
+borderLeft: isMobile ? “none” : “1px solid rgba(99,102,241,0.18)”,
+borderTop: isMobile ? “1px solid rgba(99,102,241,0.18)” : “none”,
+height: isMobile ? “58vh” : “auto”,
+position: isMobile ? “absolute” : “relative”,
+bottom: isMobile ? 0 : undefined,
+left: isMobile ? 0 : undefined,
+right: isMobile ? 0 : undefined,
+zIndex: 30,
+}}>
+<div style={{ padding: “11px 16px”, borderBottom: “1px solid rgba(99,102,241,0.12)”, display: “flex”, alignItems: “center”, gap: “8px”, flexShrink: 0 }}>
+<div style={{ width: “7px”, height: “7px”, borderRadius: “50%”, background: “#34D399”, boxShadow: “0 0 8px #34D399” }} />
+<span style={{ fontSize: “11px”, fontWeight: 500, color: “#94a3b8”, letterSpacing: “0.06em” }}>
+PAPER GUIDE{paper.meta?.arxivId ? ` · arXiv:${paper.meta.arxivId}` : “”}
+</span>
+{isMobile && (
+<button onClick={() => setShowChat(false)} style={{ marginLeft: “auto”, background: “none”, border: “none”, color: “#64748b”, cursor: “pointer”, fontSize: “20px”, lineHeight: 1 }}>✕</button>
+)}
+</div>
+
+```
+  <div style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch", padding: "16px" }}>
+    {messages.map((m, i) => (
+      <div key={i} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: "10px" }}>
+        <div style={{
+          maxWidth: "88%", padding: "10px 14px",
+          borderRadius: m.role === "user" ? "18px 18px 4px 18px" : "4px 18px 18px 18px",
+          background: m.role === "user" ? "linear-gradient(135deg,#1d4ed8,#2563eb)" : "rgba(28,32,52,0.95)",
+          border: m.role === "assistant" ? "1px solid rgba(99,102,241,0.2)" : "none",
+          color: "#e2e8f0", fontSize: "13px", lineHeight: "1.6", whiteSpace: "pre-wrap",
+        }}>{m.content}</div>
+      </div>
+    ))}
+    {chatLoading && (
+      <div style={{ display: "flex", gap: "5px", padding: "4px 0" }}>
+        {[0,1,2].map(i => <div key={i} style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#6366f1", animation: `kp 1.2s ease ${i*0.2}s infinite` }} />)}
+      </div>
+    )}
+    <div ref={chatEndRef} />
+  </div>
+
+  {messages.length <= 1 && (
+    <div style={{ padding: "0 16px 10px", display: "flex", flexWrap: "wrap", gap: "6px" }}>
+      {["Key result?", "Explain the method", "Main figures?", "Literature context?"].map(q => (
+        <button key={q} onClick={() => setInput(q)} style={{ padding: "5px 10px", borderRadius: "20px", border: "1px solid rgba(99,102,241,0.3)", background: "rgba(99,102,241,0.08)", color: "#a5b4fc", cursor: "pointer", fontSize: "11px" }}>{q}</button>
+      ))}
+    </div>
+  )}
+
+  <div style={{ padding: "10px 12px", borderTop: "1px solid rgba(99,102,241,0.12)", display: "flex", gap: "8px", flexShrink: 0 }}>
+    <input
+      value={input}
+      onChange={e => setInput(e.target.value)}
+      onKeyDown={e => e.key === "Enter" && sendMessage()}
+      placeholder="Ask about the paper…"
+      style={{ flex: 1, padding: "11px 16px", borderRadius: "24px", border: "1px solid rgba(99,102,241,0.28)", background: "rgba(12,15,36,0.9)", color: "#e2e8f0", fontSize: "16px", outline: "none" }}
+    />
+    <button
+      onClick={sendMessage}
+      disabled={chatLoading}
+      style={{ width: "44px", height: "44px", borderRadius: "50%", border: "none", background: chatLoading ? "#1e293b" : "linear-gradient(135deg,#4f46e5,#7c3aed)", color: "white", fontSize: "18px", cursor: chatLoading ? "not-allowed" : "pointer", flexShrink: 0, boxShadow: chatLoading ? "none" : "0 0 18px rgba(99,102,241,0.35)" }}
+    >↑</button>
+  </div>
+</div>
+```
+
+);
+
+return (
+<div style={{ display: “flex”, flexDirection: “column”, height: “100vh”, overflow: “hidden” }}>
+{paper && (
+<header style={{ display: “flex”, alignItems: “center”, padding: “10px 16px”, background: “rgba(10,12,28,0.98)”, borderBottom: “1px solid rgba(99,102,241,0.16)”, flexShrink: 0, gap: “12px”, zIndex: 40 }}>
+<div style={{ width: “3px”, height: “32px”, borderRadius: “2px”, background: “linear-gradient(to bottom,#6366f1,#8b5cf6)”, flexShrink: 0 }} />
+<div style={{ flex: 1, minWidth: 0 }}>
+<div style={{ fontSize: “13px”, fontWeight: 500, color: “#c7d2fe”, whiteSpace: “nowrap”, overflow: “hidden”, textOverflow: “ellipsis” }}>
+{paper.meta?.arxivId ? `arXiv:${paper.meta.arxivId}` : (paper.meta?.title || “Paper”)}
+</div>
+<div style={{ fontSize: “10px”, color: “#334155”, letterSpacing: “0.05em”, marginTop: “1px”, fontFamily: “monospace” }}>
+{paper.doc.numPages} pages · {paper.annotations.length > 0 ? “skim annotations active” : “generic skim mode”}
+</div>
+</div>
+<button onClick={() => { setPaper(null); setShowChat(false); }} style={{ …btn(false, “#64748b”), fontSize: “11px”, padding: “5px 10px” }}>↩{!isMobile && “ Open”}</button>
+<button onClick={() => setSkimMode(m => !m)} style={btn(skimMode, “#34D399”)}>
+<span>{skimMode ? “✏️” : “📄”}</span>
+{!isMobile && <span>{skimMode ? “Skim” : “Full”}</span>}
+</button>
+<button onClick={() => setShowChat(c => !c)} style={btn(showChat, “#a5b4fc”)}>
+<span>💬</span>
+{!isMobile && <span>Guide</span>}
+</button>
+</header>
+)}
+
+```
+  <div style={{ display: "flex", flex: 1, overflow: "hidden", position: "relative" }}>
+    <div style={{
+      flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch",
+      padding: paper ? (isMobile ? "16px 12px" : "24px 32px") : "0",
+      display: "flex", flexDirection: "column", alignItems: "center",
+      background: "radial-gradient(ellipse at 50% 0%,rgba(28,32,65,0.4) 0%,#080a16 65%)",
+    }}>
+      {!paper && <LoadScreen onLoad={handlePaperLoaded} />}
+      {paper && (
+        <div style={{ width: "100%", maxWidth: "680px" }}>
+          {Array.from({ length: paper.doc.numPages }, (_, i) => (
+            <PdfPage key={i+1} pdfDoc={paper.doc} pageNum={i+1} skimMode={skimMode} annotations={paper.annotations} />
+          ))}
+        </div>
+      )}
+    </div>
+    {showChat && paper && chatPanel}
+  </div>
+</div>
+```
+
+);
+}
+
+ReactDOM.createRoot(document.getElementById(“root”)).render(<App />);
+</script>
+
+</body>
+</html>
