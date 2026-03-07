@@ -208,7 +208,6 @@ return (
 <h2 style={{ fontSize: “18px”, fontWeight: 500, color: “#c7d2fe”, margin: “0 0 6px” }}>Open a Paper</h2>
 <p style={{ fontSize: “12px”, color: “#475569”, margin: “0 0 28px” }}>arXiv ID · abstract URL · PDF URL · or upload</p>
 
-```
   <div style={{ width: "100%", maxWidth: "340px", marginBottom: "10px" }}>
     <div style={{ display: "flex", gap: "8px" }}>
       <input
@@ -264,8 +263,6 @@ return (
   </div>
   <input ref={fileRef} type="file" accept="application/pdf" style={{ display: "none" }} onChange={e => handleFile(e.target.files[0])} />
 </div>
-```
-
 );
 }
 
@@ -351,7 +348,6 @@ PAPER GUIDE{paper.meta?.arxivId ? ` · arXiv:${paper.meta.arxivId}` : “”}
 )}
 </div>
 
-```
   <div style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch", padding: "16px" }}>
     {messages.map((m, i) => (
       <div key={i} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: "10px" }}>
@@ -395,7 +391,6 @@ PAPER GUIDE{paper.meta?.arxivId ? ` · arXiv:${paper.meta.arxivId}` : “”}
     >↑</button>
   </div>
 </div>
-```
 
 );
 
@@ -424,7 +419,6 @@ return (
 </header>
 )}
 
-```
   <div style={{ display: "flex", flex: 1, overflow: "hidden", position: "relative" }}>
     <div style={{
       flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch",
@@ -444,7 +438,6 @@ return (
     {showChat && paper && chatPanel}
   </div>
 </div>
-```
 
 );
 }
