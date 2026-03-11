@@ -1,5 +1,4 @@
 <!DOCTYPE html>
-
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -8,9 +7,6 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html, body, #root { height: 100%; width: 100%; overflow: hidden; }
@@ -24,433 +20,683 @@
 </head>
 <body>
 <div id="root"></div>
-<script type="text/babel">
-const { useState, useEffect, useRef, useCallback } = React;
-
+<script>
 // ── arXiv resolution ──────────────────────────────────────────────────────────
 function resolveInput(raw) {
-const s = raw.trim();
-if (/^\d{4}.\d{4,5}$/.test(s) || /^[a-z-]+/\d{7}$/.test(s))
-return { pdfUrl: `https://arxiv.org/pdf/${s}`, arxivId: s };
-const idMatch = s.match(/arxiv[:\s]+([^\s]+)/i);
-if (idMatch) return { pdfUrl: `https://arxiv.org/pdf/${idMatch[1]}`, arxivId: idMatch[1] };
-const absMatch = s.match(/arxiv.org/abs/([^\s?#]+)/i);
-if (absMatch) return { pdfUrl: `https://arxiv.org/pdf/${absMatch[1]}`, arxivId: absMatch[1] };
-const pdfMatch = s.match(/arxiv.org/pdf/([^\s?#]+)/i);
-if (pdfMatch) return { pdfUrl: `https://arxiv.org/pdf/${pdfMatch[1]}`, arxivId: pdfMatch[1] };
-if (s.startsWith(“http”)) return { pdfUrl: s, arxivId: null };
-return null;
+  var s = raw.trim();
+  if (/^\d{4}\.\d{4,5}$/.test(s) || /^[a-z-]+\/\d{7}$/.test(s))
+    return { pdfUrl: "https://arxiv.org/pdf/" + s, arxivId: s };
+  var idMatch = s.match(/arxiv[:\s]+([^\s]+)/i);
+  if (idMatch) return { pdfUrl: "https://arxiv.org/pdf/" + idMatch[1], arxivId: idMatch[1] };
+  var absMatch = s.match(/arxiv\.org\/abs\/([^\s?#]+)/i);
+  if (absMatch) return { pdfUrl: "https://arxiv.org/pdf/" + absMatch[1], arxivId: absMatch[1] };
+  var pdfMatch = s.match(/arxiv\.org\/pdf\/([^\s?#]+)/i);
+  if (pdfMatch) return { pdfUrl: "https://arxiv.org/pdf/" + pdfMatch[1], arxivId: pdfMatch[1] };
+  if (s.indexOf("http") === 0) return { pdfUrl: s, arxivId: null };
+  return null;
 }
 
-const PROXIES = [
-u => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
-u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-u => `https://thingproxy.freeboard.io/fetch/${u}`,
+var PROXIES = [
+  function(u) { return "https://corsproxy.io/?url=" + encodeURIComponent(u); },
+  function(u) { return "https://api.allorigins.win/raw?url=" + encodeURIComponent(u); },
+  function(u) { return "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(u); },
+  function(u) { return "https://thingproxy.freeboard.io/fetch/" + u; },
 ];
 
-async function fetchPdfWithFallback(pdfUrl, onStatus) {
-for (let i = 0; i < PROXIES.length; i++) {
-const url = PROXIES[i](pdfUrl);
-onStatus(`Trying proxy ${i + 1} of ${PROXIES.length}…`);
-try {
-const r = await fetch(url, { signal: AbortSignal.timeout(15000) });
-if (!r.ok) continue;
-const buf = await r.arrayBuffer();
-if (buf.byteLength < 1000) continue;
-// Verify it looks like a PDF
-const header = new Uint8Array(buf.slice(0, 5));
-const isPdf = String.fromCharCode(…header) === “%PDF-”;
-if (!isPdf) continue;
-return buf;
-} catch { /* try next */ }
-}
-throw new Error(“All proxies failed”);
+function fetchPdfWithFallback(pdfUrl, onStatus) {
+  var i = 0;
+  function tryNext() {
+    if (i >= PROXIES.length) return Promise.reject(new Error("All proxies failed"));
+    var url = PROXIES[i](pdfUrl);
+    onStatus("Trying proxy " + (i + 1) + " of " + PROXIES.length + "\u2026");
+    i++;
+    var controller = new AbortController();
+    var timer = setTimeout(function() { controller.abort(); }, 15000);
+    return fetch(url, { signal: controller.signal }).then(function(r) {
+      clearTimeout(timer);
+      if (!r.ok) return tryNext();
+      return r.arrayBuffer().then(function(buf) {
+        if (buf.byteLength < 1000) return tryNext();
+        var header = new Uint8Array(buf.slice(0, 5));
+        var str = "";
+        for (var j = 0; j < 5; j++) str += String.fromCharCode(header[j]);
+        if (str !== "%PDF-") return tryNext();
+        return buf;
+      });
+    }).catch(function() {
+      clearTimeout(timer);
+      return tryNext();
+    });
+  }
+  return tryNext();
 }
 
 // ── PDF text extraction ───────────────────────────────────────────────────────
-async function extractPdfText(pdfDoc, maxChars = 24000) {
-let text = “”;
-for (let p = 1; p <= pdfDoc.numPages && text.length < maxChars; p++) {
-const page = await pdfDoc.getPage(p);
-const content = await page.getTextContent();
-text += content.items.map(i => i.str).join(” “) + “\n\n”;
-}
-return text.slice(0, maxChars);
+function extractPdfText(pdfDoc, maxChars) {
+  maxChars = maxChars || 24000;
+  var text = "";
+  var p = 1;
+  function nextPage() {
+    if (p > pdfDoc.numPages || text.length >= maxChars) return Promise.resolve(text.slice(0, maxChars));
+    return pdfDoc.getPage(p).then(function(page) {
+      return page.getTextContent().then(function(content) {
+        text += content.items.map(function(it) { return it.str; }).join(" ") + "\n\n";
+        p++;
+        return nextPage();
+      });
+    });
+  }
+  return nextPage();
 }
 
 function buildSystemPrompt(text, meta) {
-return `You are an expert guide embedded in an interactive scientific paper reader. ${meta?.arxivId ? `Paper: arXiv:${meta.arxivId}`: meta?.title ?`Paper: “${meta.title}”` : “”}
-
-FULL PAPER TEXT (extracted):
-${text}
-
-Your role: help the reader navigate, understand, and engage with this paper.
-
-- Answer questions about content, methods, results, and significance
-- Point to specific sections or figures when relevant
-- Explain jargon at the level of a physics/astrophysics researcher
-- Be concise and precise
-- When asked to summarize, highlight key contributions and main results`;
-  }
+  var paperInfo = "";
+  if (meta && meta.arxivId) paperInfo = " Paper: arXiv:" + meta.arxivId;
+  else if (meta && meta.title) paperInfo = ' Paper: "' + meta.title + '"';
+  return "You are an expert guide embedded in an interactive scientific paper reader." + paperInfo + "\n\nFULL PAPER TEXT (extracted):\n" + text + "\n\nYour role: help the reader navigate, understand, and engage with this paper.\n\n- Answer questions about content, methods, results, and significance\n- Point to specific sections or figures when relevant\n- Explain jargon at the level of a physics/astrophysics researcher\n- Be concise and precise\n- When asked to summarize, highlight key contributions and main results";
+}
 
 // ── Skim annotations for 2210.05140 ──────────────────────────────────────────
-const DEFAULT_ANNOTATIONS = [
-{ page: 1, xFrac: 0.52, yFrac: 0.09, color: “#60A5FA”, label: “The Pitch”,       text: “kNN for point ↔ field. Sequel to the 2021 point↔point paper.”, rotate: -1.5 },
-{ page: 1, xFrac: 0.02, yFrac: 0.76, color: “#34D399”, label: “20 Years of 2pt”, text: “Cross-correlations have been 2pt-only for two decades. This changes that.”, rotate: 1.2 },
-{ page: 2, xFrac: 0.52, yFrac: 0.22, color: “#C084FC”, label: “The Formalism”,   text: “kNN(tracer) ⊗ field smoothed at r₁…rₙ → all N-pt joint functions.”, rotate: -0.8 },
-{ page: 3, xFrac: 0.03, yFrac: 0.48, color: “#FBBF24”, label: “Gaussian Check”,  text: “Validated on Gaussian fields first. Clean isolation.”, rotate: 1.5 },
-{ page: 4, xFrac: 0.52, yFrac: 0.06, color: “#F87171”, label: “★ Money Result”,  text: “>5σ vs ~1σ from 2pt in high-noise. Show this to everyone.”, rotate: -1.2 },
-{ page: 5, xFrac: 0.03, yFrac: 0.52, color: “#FB923C”, label: “Applications”,    text: “Galaxy×CMB lensing, ν×LSS, X-ray×AGN — all benefit.”, rotate: 0.8 },
-{ page: 6, xFrac: 0.52, yFrac: 0.14, color: “#22D3EE”, label: “HEFT Works”,      text: “Same bias params as 2pt. No new free parameters. Clean.”, rotate: -0.5 },
+var DEFAULT_ANNOTATIONS = [
+  { page: 1, xFrac: 0.52, yFrac: 0.09, color: "#60A5FA", label: "The Pitch",       text: "kNN for point \u2194 field. Sequel to the 2021 point\u2194point paper.", rotate: -1.5 },
+  { page: 1, xFrac: 0.02, yFrac: 0.76, color: "#34D399", label: "20 Years of 2pt", text: "Cross-correlations have been 2pt-only for two decades. This changes that.", rotate: 1.2 },
+  { page: 2, xFrac: 0.52, yFrac: 0.22, color: "#C084FC", label: "The Formalism",   text: "kNN(tracer) \u2297 field smoothed at r\u2081\u2026r\u2099 \u2192 all N-pt joint functions.", rotate: -0.8 },
+  { page: 3, xFrac: 0.03, yFrac: 0.48, color: "#FBBF24", label: "Gaussian Check",  text: "Validated on Gaussian fields first. Clean isolation.", rotate: 1.5 },
+  { page: 4, xFrac: 0.52, yFrac: 0.06, color: "#F87171", label: "\u2605 Money Result",  text: ">5\u03C3 vs ~1\u03C3 from 2pt in high-noise. Show this to everyone.", rotate: -1.2 },
+  { page: 5, xFrac: 0.03, yFrac: 0.52, color: "#FB923C", label: "Applications",    text: "Galaxy\u00D7CMB lensing, \u03BD\u00D7LSS, X-ray\u00D7AGN \u2014 all benefit.", rotate: 0.8 },
+  { page: 6, xFrac: 0.52, yFrac: 0.14, color: "#22D3EE", label: "HEFT Works",      text: "Same bias params as 2pt. No new free parameters. Clean.", rotate: -0.5 },
 ];
 
-// ── Components ────────────────────────────────────────────────────────────────
-function Callout({ xFrac, yFrac, color, label, text, rotate }) {
-return (
-<div style={{
-position: “absolute”, left: `${xFrac * 100}%`, top: `${yFrac * 100}%`,
-width: “155px”, background: “rgba(6,8,20,0.95)”,
-border: `1.5px solid ${color}`, borderRadius: “3px”,
-padding: “7px 9px 8px”, transform: `rotate(${rotate}deg)`,
-zIndex: 20, pointerEvents: “none”,
-boxShadow: `0 4px 20px rgba(0,0,0,0.7), 0 0 0 1px ${color}18`,
-}}>
-<div style={{ fontFamily: “‘Caveat’,cursive”, fontSize: “13px”, fontWeight: 700, color, marginBottom: “3px”, lineHeight: 1 }}>{label}</div>
-<div style={{ fontFamily: “‘Caveat’,cursive”, fontSize: “12px”, color: “rgba(210,220,255,0.85)”, lineHeight: “1.45” }}>{text}</div>
-</div>
-);
+// ── DOM helpers ───────────────────────────────────────────────────────────────
+function el(tag, attrs, children) {
+  var node = document.createElement(tag);
+  if (attrs) {
+    Object.keys(attrs).forEach(function(k) {
+      if (k === "style" && typeof attrs[k] === "object") {
+        Object.keys(attrs[k]).forEach(function(sk) { node.style[sk] = attrs[k][sk]; });
+      } else if (k === "className") {
+        node.className = attrs[k];
+      } else if (k.indexOf("on") === 0) {
+        node.addEventListener(k.slice(2).toLowerCase(), attrs[k]);
+      } else if (k === "disabled") {
+        node.disabled = attrs[k];
+      } else if (k === "value") {
+        node.value = attrs[k];
+      } else if (k === "placeholder") {
+        node.placeholder = attrs[k];
+      } else if (k === "type") {
+        node.type = attrs[k];
+      } else if (k === "accept") {
+        node.accept = attrs[k];
+      } else if (k === "innerHTML") {
+        node.innerHTML = attrs[k];
+      } else {
+        node.setAttribute(k, attrs[k]);
+      }
+    });
+  }
+  if (children !== undefined && children !== null) {
+    if (typeof children === "string") {
+      node.textContent = children;
+    } else if (Array.isArray(children)) {
+      children.forEach(function(c) { if (c) node.appendChild(c); });
+    } else if (children instanceof Node) {
+      node.appendChild(children);
+    }
+  }
+  return node;
 }
 
-function PdfPage({ pdfDoc, pageNum, skimMode, annotations }) {
-const canvasRef = useRef(null);
-const annots = annotations.filter(a => a.page === pageNum);
-
-useEffect(() => {
-if (!pdfDoc || !canvasRef.current) return;
-let cancelled = false;
-pdfDoc.getPage(pageNum).then(page => {
-if (cancelled || !canvasRef.current) return;
-const vp = page.getViewport({ scale: 2.0 });
-const canvas = canvasRef.current;
-canvas.width = vp.width;
-canvas.height = vp.height;
-page.render({ canvasContext: canvas.getContext(“2d”), viewport: vp });
-});
-return () => { cancelled = true; };
-}, [pdfDoc, pageNum]);
-
-return (
-<div style={{ position: “relative”, width: “100%”, marginBottom: “24px” }}>
-<div style={{ fontSize: “10px”, color: “#374151”, textAlign: “center”, letterSpacing: “0.15em”, marginBottom: “5px”, fontFamily: “monospace” }}>
-— {pageNum} —
-</div>
-<div style={{ position: “relative” }}>
-<canvas ref={canvasRef} style={{
-width: “100%”, display: “block”, borderRadius: “2px”,
-filter: skimMode ? “brightness(0.38) saturate(0.08)” : “brightness(0.96)”,
-transition: “filter 0.4s ease”,
-}} />
-{skimMode && annots.map((a, i) => <Callout key={i} {…a} />)}
-</div>
-</div>
-);
+function setStyles(node, styles) {
+  Object.keys(styles).forEach(function(k) { node.style[k] = styles[k]; });
 }
 
-function LoadScreen({ onLoad }) {
-const [urlInput, setUrlInput] = useState(“2210.05140”);
-const [status, setStatus] = useState(null);
-const [error, setError] = useState(null);
-const [dragging, setDragging] = useState(false);
-const fileRef = useRef(null);
+function clearEl(node) {
+  while (node.firstChild) node.removeChild(node.firstChild);
+}
 
-const loadFromBuffer = async (buf, meta = {}) => {
-pdfjsLib.GlobalWorkerOptions.workerSrc =
-“https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js”;
-const doc = await pdfjsLib.getDocument({
-data: buf,
-cMapUrl: “https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/”,
-cMapPacked: true,
-}).promise;
-setStatus(“Extracting text for AI…”);
-const text = await extractPdfText(doc);
-const systemPrompt = buildSystemPrompt(text, meta);
-const annotations = meta.arxivId === “2210.05140” ? DEFAULT_ANNOTATIONS : [];
-onLoad({ doc, systemPrompt, annotations, meta });
+function loadingDots() {
+  var wrap = el("div", { style: { display: "flex", gap: "3px" } });
+  for (var i = 0; i < 3; i++) {
+    wrap.appendChild(el("div", { style: {
+      width: "5px", height: "5px", borderRadius: "50%", background: "#6366f1",
+      animation: "kp 1.2s ease " + (i * 0.2) + "s infinite"
+    } }));
+  }
+  return wrap;
+}
+
+// ── App State ─────────────────────────────────────────────────────────────────
+var state = {
+  paper: null,
+  skimMode: true,
+  showChat: false,
+  messages: [],
+  input: "",
+  chatLoading: false,
+  isMobile: window.innerWidth < 700,
+  // load screen state
+  urlInput: "2210.05140",
+  loadStatus: null,
+  loadError: null,
+  dragging: false,
 };
 
-const handleUrl = async () => {
-const resolved = resolveInput(urlInput);
-if (!resolved) { setError(“Try an arXiv ID like 2210.05140, an arXiv URL, or any PDF URL.”); return; }
-setError(null);
-try {
-const buf = await fetchPdfWithFallback(resolved.pdfUrl, setStatus);
-setStatus(“Parsing PDF…”);
-await loadFromBuffer(buf, { arxivId: resolved.arxivId, pdfUrl: resolved.pdfUrl });
-} catch {
-setStatus(null);
-setError(“All proxies failed. Use the file upload below — download the PDF first, then select it.”);
-}
-};
+var root = document.getElementById("root");
 
-const handleFile = async (file) => {
-if (!file || file.type !== “application/pdf”) { setError(“Please select a PDF file.”); return; }
-setError(null); setStatus(“Parsing PDF…”);
-try {
-const buf = await file.arrayBuffer();
-await loadFromBuffer(buf, { title: file.name.replace(/.pdf$/i, “”) });
-} catch { setError(“Failed to parse PDF.”); setStatus(null); }
-};
+// ── Render functions ──────────────────────────────────────────────────────────
 
-return (
-<div style={{ display: “flex”, flexDirection: “column”, alignItems: “center”, justifyContent: “center”, height: “100%”, padding: “32px 24px”, textAlign: “center” }}>
-<div style={{ width: “48px”, height: “3px”, background: “linear-gradient(to right,#6366f1,#8b5cf6)”, borderRadius: “2px”, marginBottom: “28px” }} />
-<h2 style={{ fontSize: “18px”, fontWeight: 500, color: “#c7d2fe”, margin: “0 0 6px” }}>Open a Paper</h2>
-<p style={{ fontSize: “12px”, color: “#475569”, margin: “0 0 28px” }}>arXiv ID · abstract URL · PDF URL · or upload</p>
-
-```
-  <div style={{ width: "100%", maxWidth: "340px", marginBottom: "10px" }}>
-    <div style={{ display: "flex", gap: "8px" }}>
-      <input
-        value={urlInput}
-        onChange={e => { setUrlInput(e.target.value); setError(null); }}
-        onKeyDown={e => e.key === "Enter" && !status && handleUrl()}
-        placeholder="2210.05140 or URL…"
-        style={{ flex: 1, padding: "11px 16px", borderRadius: "10px", border: "1px solid rgba(99,102,241,0.35)", background: "rgba(12,15,36,0.9)", color: "#e2e8f0", fontSize: "15px", outline: "none" }}
-      />
-      <button
-        onClick={handleUrl}
-        disabled={!!status}
-        style={{ padding: "11px 18px", borderRadius: "10px", border: "none", background: status ? "#1e293b" : "linear-gradient(135deg,#4f46e5,#7c3aed)", color: "white", fontSize: "13px", cursor: status ? "not-allowed" : "pointer", fontWeight: 500 }}
-      >
-        {status ? "…" : "Load →"}
-      </button>
-    </div>
-    <div style={{ display: "flex", gap: "6px", marginTop: "8px", flexWrap: "wrap", justifyContent: "center" }}>
-      {["2210.05140", "arxiv.org/abs/…", "any PDF URL"].map(h => (
-        <span key={h} style={{ fontSize: "10px", color: "#374151", background: "rgba(99,102,241,0.08)", border: "1px solid rgba(99,102,241,0.15)", borderRadius: "4px", padding: "2px 7px", fontFamily: "monospace" }}>{h}</span>
-      ))}
-    </div>
-  </div>
-
-  {status && (
-    <div style={{ fontSize: "12px", color: "#818cf8", margin: "8px 0", display: "flex", alignItems: "center", gap: "8px" }}>
-      <div style={{ display: "flex", gap: "3px" }}>
-        {[0,1,2].map(i => <div key={i} style={{ width: "5px", height: "5px", borderRadius: "50%", background: "#6366f1", animation: `kp 1.2s ease ${i*0.2}s infinite` }} />)}
-      </div>
-      {status}
-    </div>
-  )}
-  {error && (
-    <div style={{ fontSize: "12px", color: "#f87171", maxWidth: "300px", margin: "8px 0", lineHeight: 1.6 }}>{error}</div>
-  )}
-
-  <div style={{ display: "flex", alignItems: "center", gap: "12px", margin: "20px 0", width: "100%", maxWidth: "340px" }}>
-    <div style={{ flex: 1, height: "1px", background: "rgba(99,102,241,0.15)" }} />
-    <span style={{ fontSize: "11px", color: "#374151" }}>or upload file</span>
-    <div style={{ flex: 1, height: "1px", background: "rgba(99,102,241,0.15)" }} />
-  </div>
-
-  <div
-    onClick={() => !status && fileRef.current?.click()}
-    onDragOver={e => { e.preventDefault(); setDragging(true); }}
-    onDragLeave={() => setDragging(false)}
-    onDrop={e => { e.preventDefault(); setDragging(false); handleFile(e.dataTransfer.files[0]); }}
-    style={{ width: "100%", maxWidth: "340px", border: `2px dashed ${dragging ? "#6366f1" : "rgba(99,102,241,0.25)"}`, borderRadius: "10px", padding: "28px 24px", cursor: status ? "wait" : "pointer", background: dragging ? "rgba(99,102,241,0.07)" : "rgba(12,15,36,0.4)", transition: "all 0.2s" }}
-  >
-    <div style={{ fontSize: "32px", marginBottom: "10px", opacity: 0.7 }}>📂</div>
-    <div style={{ fontSize: "13px", color: "#64748b" }}>Tap to select PDF from Files</div>
-    <div style={{ fontSize: "11px", color: "#334155", marginTop: "4px" }}>Works offline — no proxy needed</div>
-  </div>
-  <input ref={fileRef} type="file" accept="application/pdf" style={{ display: "none" }} onChange={e => handleFile(e.target.files[0])} />
-</div>
-```
-
-);
+function renderCallout(a) {
+  var outer = el("div", { style: {
+    position: "absolute", left: (a.xFrac * 100) + "%", top: (a.yFrac * 100) + "%",
+    width: "155px", background: "rgba(6,8,20,0.95)",
+    border: "1.5px solid " + a.color, borderRadius: "3px",
+    padding: "7px 9px 8px", transform: "rotate(" + a.rotate + "deg)",
+    zIndex: "20", pointerEvents: "none",
+    boxShadow: "0 4px 20px rgba(0,0,0,0.7), 0 0 0 1px " + a.color + "18",
+  } }, [
+    el("div", { style: { fontFamily: "'Caveat',cursive", fontSize: "13px", fontWeight: "700", color: a.color, marginBottom: "3px", lineHeight: "1" } }, a.label),
+    el("div", { style: { fontFamily: "'Caveat',cursive", fontSize: "12px", color: "rgba(210,220,255,0.85)", lineHeight: "1.45" } }, a.text),
+  ]);
+  return outer;
 }
 
-// ── Main App ──────────────────────────────────────────────────────────────────
-function App() {
-const [paper, setPaper] = useState(null);
-const [skimMode, setSkimMode] = useState(true);
-const [showChat, setShowChat] = useState(false);
-const [messages, setMessages] = useState([]);
-const [input, setInput] = useState(””);
-const [chatLoading, setChatLoading] = useState(false);
-const [isMobile, setIsMobile] = useState(window.innerWidth < 700);
-const chatEndRef = useRef(null);
+function renderPdfPage(pdfDoc, pageNum, skimMode, annotations) {
+  var annots = annotations.filter(function(a) { return a.page === pageNum; });
+  var wrapper = el("div", { style: { position: "relative", width: "100%", marginBottom: "24px" } });
+  var label = el("div", { style: {
+    fontSize: "10px", color: "#374151", textAlign: "center", letterSpacing: "0.15em",
+    marginBottom: "5px", fontFamily: "monospace",
+  } }, "\u2014 " + pageNum + " \u2014");
+  var canvasWrap = el("div", { style: { position: "relative" } });
+  var canvas = el("canvas", { style: {
+    width: "100%", display: "block", borderRadius: "2px",
+    filter: skimMode ? "brightness(0.38) saturate(0.08)" : "brightness(0.96)",
+    transition: "filter 0.4s ease",
+  } });
+  canvasWrap.appendChild(canvas);
+  if (skimMode) {
+    annots.forEach(function(a) { canvasWrap.appendChild(renderCallout(a)); });
+  }
+  wrapper.appendChild(label);
+  wrapper.appendChild(canvasWrap);
 
-useEffect(() => {
-const h = () => setIsMobile(window.innerWidth < 700);
-window.addEventListener(“resize”, h);
-return () => window.removeEventListener(“resize”, h);
-}, []);
+  // Render page to canvas
+  pdfDoc.getPage(pageNum).then(function(page) {
+    var vp = page.getViewport({ scale: 2.0 });
+    canvas.width = vp.width;
+    canvas.height = vp.height;
+    page.render({ canvasContext: canvas.getContext("2d"), viewport: vp });
+  });
 
-const handlePaperLoaded = useCallback((p) => {
-setPaper(p);
-setMessages([{ role: “assistant”, content: `Paper loaded${p.meta?.arxivId ? ` (arXiv:${p.meta.arxivId})` : ""}. Ask me anything — key results, formalism, figures, or how it fits the literature.` }]);
-setShowChat(true);
-}, []);
+  return wrapper;
+}
 
-useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: “smooth” }); }, [messages, chatLoading]);
+function renderLoadScreen() {
+  var container = el("div", { style: {
+    display: "flex", flexDirection: "column", alignItems: "center",
+    justifyContent: "center", height: "100%", padding: "32px 24px", textAlign: "center",
+  } });
 
-const sendMessage = useCallback(async () => {
-if (!input.trim() || chatLoading || !paper) return;
-const userMsg = { role: “user”, content: input.trim() };
-const newMsgs = […messages, userMsg];
-setMessages(newMsgs); setInput(””); setChatLoading(true);
-try {
-const res = await fetch(“https://api.anthropic.com/v1/messages”, {
-method: “POST”,
-headers: { “Content-Type”: “application/json” },
-body: JSON.stringify({
-model: “claude-sonnet-4-20250514”,
-max_tokens: 1000,
-system: paper.systemPrompt,
-messages: newMsgs.map(m => ({ role: m.role, content: m.content })),
-}),
+  // Accent bar
+  container.appendChild(el("div", { style: {
+    width: "48px", height: "3px", background: "linear-gradient(to right,#6366f1,#8b5cf6)",
+    borderRadius: "2px", marginBottom: "28px",
+  } }));
+
+  container.appendChild(el("h2", { style: {
+    fontSize: "18px", fontWeight: "500", color: "#c7d2fe", margin: "0 0 6px",
+  } }, "Open a Paper"));
+
+  container.appendChild(el("p", { style: {
+    fontSize: "12px", color: "#475569", margin: "0 0 28px",
+  } }, "arXiv ID \u00B7 abstract URL \u00B7 PDF URL \u00B7 or upload"));
+
+  // Input row
+  var inputRow = el("div", { style: { width: "100%", maxWidth: "340px", marginBottom: "10px" } });
+  var flex = el("div", { style: { display: "flex", gap: "8px" } });
+
+  var urlField = el("input", {
+    value: state.urlInput,
+    placeholder: "2210.05140 or URL\u2026",
+    style: {
+      flex: "1", padding: "11px 16px", borderRadius: "10px",
+      border: "1px solid rgba(99,102,241,0.35)", background: "rgba(12,15,36,0.9)",
+      color: "#e2e8f0", fontSize: "15px", outline: "none",
+    },
+    onInput: function(e) { state.urlInput = e.target.value; state.loadError = null; },
+    onKeydown: function(e) { if (e.key === "Enter" && !state.loadStatus) handleUrl(); },
+  });
+
+  var loadBtn = el("button", {
+    disabled: !!state.loadStatus,
+    onClick: function() { if (!state.loadStatus) handleUrl(); },
+    style: {
+      padding: "11px 18px", borderRadius: "10px", border: "none",
+      background: state.loadStatus ? "#1e293b" : "linear-gradient(135deg,#4f46e5,#7c3aed)",
+      color: "white", fontSize: "13px",
+      cursor: state.loadStatus ? "not-allowed" : "pointer", fontWeight: "500",
+    },
+  }, state.loadStatus ? "\u2026" : "Load \u2192");
+
+  flex.appendChild(urlField);
+  flex.appendChild(loadBtn);
+  inputRow.appendChild(flex);
+
+  // Hints
+  var hints = el("div", { style: {
+    display: "flex", gap: "6px", marginTop: "8px", flexWrap: "wrap", justifyContent: "center",
+  } });
+  ["2210.05140", "arxiv.org/abs/\u2026", "any PDF URL"].forEach(function(h) {
+    hints.appendChild(el("span", { style: {
+      fontSize: "10px", color: "#374151", background: "rgba(99,102,241,0.08)",
+      border: "1px solid rgba(99,102,241,0.15)", borderRadius: "4px",
+      padding: "2px 7px", fontFamily: "monospace",
+    } }, h));
+  });
+  inputRow.appendChild(hints);
+  container.appendChild(inputRow);
+
+  // Status
+  if (state.loadStatus) {
+    var statusEl = el("div", { style: {
+      fontSize: "12px", color: "#818cf8", margin: "8px 0",
+      display: "flex", alignItems: "center", gap: "8px",
+    } }, [loadingDots(), document.createTextNode(state.loadStatus)]);
+    container.appendChild(statusEl);
+  }
+
+  // Error
+  if (state.loadError) {
+    container.appendChild(el("div", { style: {
+      fontSize: "12px", color: "#f87171", maxWidth: "300px", margin: "8px 0", lineHeight: "1.6",
+    } }, state.loadError));
+  }
+
+  // Divider
+  var divider = el("div", { style: {
+    display: "flex", alignItems: "center", gap: "12px", margin: "20px 0",
+    width: "100%", maxWidth: "340px",
+  } }, [
+    el("div", { style: { flex: "1", height: "1px", background: "rgba(99,102,241,0.15)" } }),
+    el("span", { style: { fontSize: "11px", color: "#374151" } }, "or upload file"),
+    el("div", { style: { flex: "1", height: "1px", background: "rgba(99,102,241,0.15)" } }),
+  ]);
+  container.appendChild(divider);
+
+  // File input (hidden)
+  var fileInput = el("input", { type: "file", accept: "application/pdf", style: { display: "none" } });
+  fileInput.addEventListener("change", function(e) { handleFile(e.target.files[0]); });
+
+  // Drop zone
+  var dropZone = el("div", {
+    onClick: function() { if (!state.loadStatus) fileInput.click(); },
+    onDragover: function(e) { e.preventDefault(); state.dragging = true; setStyles(dropZone, { borderColor: "#6366f1", background: "rgba(99,102,241,0.07)" }); },
+    onDragleave: function() { state.dragging = false; setStyles(dropZone, { borderColor: "rgba(99,102,241,0.25)", background: "rgba(12,15,36,0.4)" }); },
+    onDrop: function(e) { e.preventDefault(); state.dragging = false; handleFile(e.dataTransfer.files[0]); },
+    style: {
+      width: "100%", maxWidth: "340px",
+      border: "2px dashed " + (state.dragging ? "#6366f1" : "rgba(99,102,241,0.25)"),
+      borderRadius: "10px", padding: "28px 24px",
+      cursor: state.loadStatus ? "wait" : "pointer",
+      background: state.dragging ? "rgba(99,102,241,0.07)" : "rgba(12,15,36,0.4)",
+      transition: "all 0.2s",
+    },
+  }, [
+    el("div", { style: { fontSize: "32px", marginBottom: "10px", opacity: "0.7" } }, "\uD83D\uDCC2"),
+    el("div", { style: { fontSize: "13px", color: "#64748b" } }, "Tap to select PDF from Files"),
+    el("div", { style: { fontSize: "11px", color: "#334155", marginTop: "4px" } }, "Works offline \u2014 no proxy needed"),
+  ]);
+  container.appendChild(dropZone);
+  container.appendChild(fileInput);
+
+  return container;
+}
+
+function btnStyle(active, ac) {
+  return {
+    display: "flex", alignItems: "center", gap: "6px",
+    padding: "7px 12px", borderRadius: "8px", cursor: "pointer",
+    border: "1px solid " + (active ? ac + "55" : "rgba(255,255,255,0.08)"),
+    background: active ? ac + "1a" : "rgba(255,255,255,0.05)",
+    color: active ? ac : "#64748b",
+    fontSize: "12px", fontWeight: "500", transition: "all 0.2s", flexShrink: "0",
+  };
+}
+
+function renderChatPanel() {
+  var isMobile = state.isMobile;
+  var paper = state.paper;
+  var panel = el("div", { style: {
+    width: isMobile ? "100%" : "360px", flexShrink: "0",
+    display: "flex", flexDirection: "column",
+    background: "rgba(6,8,20,0.97)",
+    borderLeft: isMobile ? "none" : "1px solid rgba(99,102,241,0.18)",
+    borderTop: isMobile ? "1px solid rgba(99,102,241,0.18)" : "none",
+    height: isMobile ? "58vh" : "auto",
+    position: isMobile ? "absolute" : "relative",
+    bottom: isMobile ? "0" : "",
+    left: isMobile ? "0" : "",
+    right: isMobile ? "0" : "",
+    zIndex: "30",
+  } });
+
+  // Header
+  var headerRow = el("div", { style: {
+    padding: "11px 16px", borderBottom: "1px solid rgba(99,102,241,0.12)",
+    display: "flex", alignItems: "center", gap: "8px", flexShrink: "0",
+  } });
+  headerRow.appendChild(el("div", { style: {
+    width: "7px", height: "7px", borderRadius: "50%",
+    background: "#34D399", boxShadow: "0 0 8px #34D399",
+  } }));
+  headerRow.appendChild(el("span", { style: {
+    fontSize: "11px", fontWeight: "500", color: "#94a3b8", letterSpacing: "0.06em",
+  } }, "PAPER GUIDE" + (paper.meta && paper.meta.arxivId ? " \u00B7 arXiv:" + paper.meta.arxivId : "")));
+  if (isMobile) {
+    var closeBtn = el("button", {
+      onClick: function() { state.showChat = false; render(); },
+      style: {
+        marginLeft: "auto", background: "none", border: "none",
+        color: "#64748b", cursor: "pointer", fontSize: "20px", lineHeight: "1",
+      },
+    }, "\u2715");
+    headerRow.appendChild(closeBtn);
+  }
+  panel.appendChild(headerRow);
+
+  // Messages area
+  var msgsArea = el("div", { style: {
+    flex: "1", overflowY: "auto", WebkitOverflowScrolling: "touch", padding: "16px",
+  } });
+  state.messages.forEach(function(m) {
+    var row = el("div", { style: {
+      display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start",
+      marginBottom: "10px",
+    } });
+    row.appendChild(el("div", { style: {
+      maxWidth: "88%", padding: "10px 14px",
+      borderRadius: m.role === "user" ? "18px 18px 4px 18px" : "4px 18px 18px 18px",
+      background: m.role === "user" ? "linear-gradient(135deg,#1d4ed8,#2563eb)" : "rgba(28,32,52,0.95)",
+      border: m.role === "assistant" ? "1px solid rgba(99,102,241,0.2)" : "none",
+      color: "#e2e8f0", fontSize: "13px", lineHeight: "1.6", whiteSpace: "pre-wrap",
+    } }, m.content));
+    msgsArea.appendChild(row);
+  });
+  if (state.chatLoading) {
+    var dotsWrap = el("div", { style: { display: "flex", gap: "5px", padding: "4px 0" } });
+    for (var i = 0; i < 3; i++) {
+      dotsWrap.appendChild(el("div", { style: {
+        width: "6px", height: "6px", borderRadius: "50%", background: "#6366f1",
+        animation: "kp 1.2s ease " + (i * 0.2) + "s infinite",
+      } }));
+    }
+    msgsArea.appendChild(dotsWrap);
+  }
+  // Scroll sentinel
+  var sentinel = el("div");
+  msgsArea.appendChild(sentinel);
+  panel.appendChild(msgsArea);
+
+  // Suggested questions
+  if (state.messages.length <= 1) {
+    var suggestWrap = el("div", { style: {
+      padding: "0 16px 10px", display: "flex", flexWrap: "wrap", gap: "6px",
+    } });
+    ["Key result?", "Explain the method", "Main figures?", "Literature context?"].forEach(function(q) {
+      suggestWrap.appendChild(el("button", {
+        onClick: function() { state.input = q; render(); },
+        style: {
+          padding: "5px 10px", borderRadius: "20px",
+          border: "1px solid rgba(99,102,241,0.3)",
+          background: "rgba(99,102,241,0.08)", color: "#a5b4fc",
+          cursor: "pointer", fontSize: "11px",
+        },
+      }, q));
+    });
+    panel.appendChild(suggestWrap);
+  }
+
+  // Input bar
+  var inputBar = el("div", { style: {
+    padding: "10px 12px", borderTop: "1px solid rgba(99,102,241,0.12)",
+    display: "flex", gap: "8px", flexShrink: "0",
+  } });
+  var chatInput = el("input", {
+    value: state.input,
+    placeholder: "Ask about the paper\u2026",
+    onInput: function(e) { state.input = e.target.value; },
+    onKeydown: function(e) { if (e.key === "Enter") sendMessage(); },
+    style: {
+      flex: "1", padding: "11px 16px", borderRadius: "24px",
+      border: "1px solid rgba(99,102,241,0.28)", background: "rgba(12,15,36,0.9)",
+      color: "#e2e8f0", fontSize: "16px", outline: "none",
+    },
+  });
+  var sendBtn = el("button", {
+    disabled: state.chatLoading,
+    onClick: sendMessage,
+    style: {
+      width: "44px", height: "44px", borderRadius: "50%", border: "none",
+      background: state.chatLoading ? "#1e293b" : "linear-gradient(135deg,#4f46e5,#7c3aed)",
+      color: "white", fontSize: "18px",
+      cursor: state.chatLoading ? "not-allowed" : "pointer",
+      flexShrink: "0",
+      boxShadow: state.chatLoading ? "none" : "0 0 18px rgba(99,102,241,0.35)",
+    },
+  }, "\u2191");
+  inputBar.appendChild(chatInput);
+  inputBar.appendChild(sendBtn);
+  panel.appendChild(inputBar);
+
+  // Scroll to bottom after mount
+  setTimeout(function() { sentinel.scrollIntoView({ behavior: "smooth" }); }, 0);
+
+  return panel;
+}
+
+function render() {
+  clearEl(root);
+  var paper = state.paper;
+  var isMobile = state.isMobile;
+
+  var outer = el("div", { style: {
+    display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden",
+  } });
+
+  // Header (when paper loaded)
+  if (paper) {
+    var header = el("header", { style: {
+      display: "flex", alignItems: "center", padding: "10px 16px",
+      background: "rgba(10,12,28,0.98)",
+      borderBottom: "1px solid rgba(99,102,241,0.16)",
+      flexShrink: "0", gap: "12px", zIndex: "40",
+    } });
+    header.appendChild(el("div", { style: {
+      width: "3px", height: "32px", borderRadius: "2px",
+      background: "linear-gradient(to bottom,#6366f1,#8b5cf6)", flexShrink: "0",
+    } }));
+
+    var titleBlock = el("div", { style: { flex: "1", minWidth: "0" } });
+    titleBlock.appendChild(el("div", { style: {
+      fontSize: "13px", fontWeight: "500", color: "#c7d2fe",
+      whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+    } }, paper.meta && paper.meta.arxivId ? "arXiv:" + paper.meta.arxivId : (paper.meta && paper.meta.title || "Paper")));
+    titleBlock.appendChild(el("div", { style: {
+      fontSize: "10px", color: "#334155", letterSpacing: "0.05em",
+      marginTop: "1px", fontFamily: "monospace",
+    } }, paper.doc.numPages + " pages \u00B7 " + (paper.annotations.length > 0 ? "skim annotations active" : "generic skim mode")));
+    header.appendChild(titleBlock);
+
+    // Open button
+    var openBtn = el("button", {
+      onClick: function() { state.paper = null; state.showChat = false; render(); },
+      style: Object.assign({}, btnStyle(false, "#64748b"), { fontSize: "11px", padding: "5px 10px" }),
+    }, "\u21A9" + (isMobile ? "" : " Open"));
+    header.appendChild(openBtn);
+
+    // Skim/Full toggle
+    var skimBtn = el("button", {
+      onClick: function() { state.skimMode = !state.skimMode; render(); },
+      style: btnStyle(state.skimMode, "#34D399"),
+    });
+    skimBtn.appendChild(el("span", null, state.skimMode ? "\u270F\uFE0F" : "\uD83D\uDCC4"));
+    if (!isMobile) skimBtn.appendChild(el("span", null, state.skimMode ? "Skim" : "Full"));
+    header.appendChild(skimBtn);
+
+    // Chat toggle
+    var chatBtn = el("button", {
+      onClick: function() { state.showChat = !state.showChat; render(); },
+      style: btnStyle(state.showChat, "#a5b4fc"),
+    });
+    chatBtn.appendChild(el("span", null, "\uD83D\uDCAC"));
+    if (!isMobile) chatBtn.appendChild(el("span", null, "Guide"));
+    header.appendChild(chatBtn);
+
+    outer.appendChild(header);
+  }
+
+  // Main content area
+  var main = el("div", { style: {
+    display: "flex", flex: "1", overflow: "hidden", position: "relative",
+  } });
+
+  var scrollArea = el("div", { style: {
+    flex: "1", overflowY: "auto", WebkitOverflowScrolling: "touch",
+    padding: paper ? (isMobile ? "16px 12px" : "24px 32px") : "0",
+    display: "flex", flexDirection: "column", alignItems: "center",
+    background: "radial-gradient(ellipse at 50% 0%,rgba(28,32,65,0.4) 0%,#080a16 65%)",
+  } });
+
+  if (!paper) {
+    scrollArea.appendChild(renderLoadScreen());
+  } else {
+    var pagesWrap = el("div", { style: { width: "100%", maxWidth: "680px" } });
+    for (var i = 1; i <= paper.doc.numPages; i++) {
+      pagesWrap.appendChild(renderPdfPage(paper.doc, i, state.skimMode, paper.annotations));
+    }
+    scrollArea.appendChild(pagesWrap);
+  }
+  main.appendChild(scrollArea);
+
+  if (state.showChat && paper) {
+    main.appendChild(renderChatPanel());
+  }
+
+  outer.appendChild(main);
+  root.appendChild(outer);
+}
+
+// ── Actions ───────────────────────────────────────────────────────────────────
+
+function loadFromBuffer(buf, meta) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  return pdfjsLib.getDocument({
+    data: buf,
+    cMapUrl: "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/",
+    cMapPacked: true,
+  }).promise.then(function(doc) {
+    state.loadStatus = "Extracting text for AI\u2026";
+    render();
+    return extractPdfText(doc).then(function(text) {
+      var systemPrompt = buildSystemPrompt(text, meta);
+      var annotations = (meta && meta.arxivId === "2210.05140") ? DEFAULT_ANNOTATIONS : [];
+      handlePaperLoaded({ doc: doc, systemPrompt: systemPrompt, annotations: annotations, meta: meta });
+    });
+  });
+}
+
+function handleUrl() {
+  var resolved = resolveInput(state.urlInput);
+  if (!resolved) {
+    state.loadError = "Try an arXiv ID like 2210.05140, an arXiv URL, or any PDF URL.";
+    render();
+    return;
+  }
+  state.loadError = null;
+  fetchPdfWithFallback(resolved.pdfUrl, function(s) {
+    state.loadStatus = s;
+    render();
+  }).then(function(buf) {
+    state.loadStatus = "Parsing PDF\u2026";
+    render();
+    return loadFromBuffer(buf, { arxivId: resolved.arxivId, pdfUrl: resolved.pdfUrl });
+  }).catch(function() {
+    state.loadStatus = null;
+    state.loadError = "All proxies failed. Use the file upload below \u2014 download the PDF first, then select it.";
+    render();
+  });
+}
+
+function handleFile(file) {
+  if (!file || file.type !== "application/pdf") {
+    state.loadError = "Please select a PDF file.";
+    render();
+    return;
+  }
+  state.loadError = null;
+  state.loadStatus = "Parsing PDF\u2026";
+  render();
+  file.arrayBuffer().then(function(buf) {
+    return loadFromBuffer(buf, { title: file.name.replace(/\.pdf$/i, "") });
+  }).catch(function() {
+    state.loadError = "Failed to parse PDF.";
+    state.loadStatus = null;
+    render();
+  });
+}
+
+function handlePaperLoaded(p) {
+  state.paper = p;
+  state.messages = [{ role: "assistant", content: "Paper loaded" + (p.meta && p.meta.arxivId ? " (arXiv:" + p.meta.arxivId + ")" : "") + ". Ask me anything \u2014 key results, formalism, figures, or how it fits the literature." }];
+  state.showChat = true;
+  state.loadStatus = null;
+  state.loadError = null;
+  state.input = "";
+  render();
+}
+
+function sendMessage() {
+  if (!state.input.trim() || state.chatLoading || !state.paper) return;
+  var userMsg = { role: "user", content: state.input.trim() };
+  state.messages.push(userMsg);
+  state.input = "";
+  state.chatLoading = true;
+  render();
+
+  var msgPayload = state.messages.map(function(m) { return { role: m.role, content: m.content }; });
+  fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1000,
+      system: state.paper.systemPrompt,
+      messages: msgPayload,
+    }),
+  }).then(function(res) {
+    return res.json();
+  }).then(function(data) {
+    state.messages.push({ role: "assistant", content: (data.content && data.content[0] && data.content[0].text) || "No response." });
+    state.chatLoading = false;
+    render();
+  }).catch(function() {
+    state.messages.push({ role: "assistant", content: "Connection error. Please try again." });
+    state.chatLoading = false;
+    render();
+  });
+}
+
+// ── Responsive listener ───────────────────────────────────────────────────────
+window.addEventListener("resize", function() {
+  var was = state.isMobile;
+  state.isMobile = window.innerWidth < 700;
+  if (was !== state.isMobile) render();
 });
-const data = await res.json();
-setMessages([…newMsgs, { role: “assistant”, content: data.content?.[0]?.text ?? “No response.” }]);
-} catch {
-setMessages([…newMsgs, { role: “assistant”, content: “Connection error. Please try again.” }]);
-}
-setChatLoading(false);
-}, [input, chatLoading, messages, paper]);
 
-const btn = (active, ac) => ({
-display: “flex”, alignItems: “center”, gap: “6px”,
-padding: “7px 12px”, borderRadius: “8px”, cursor: “pointer”,
-border: `1px solid ${active ? ac + "55" : "rgba(255,255,255,0.08)"}`,
-background: active ? ac + “1a” : “rgba(255,255,255,0.05)”,
-color: active ? ac : “#64748b”,
-fontSize: “12px”, fontWeight: 500, transition: “all 0.2s”, flexShrink: 0,
-});
-
-const chatPanel = paper && (
-<div style={{
-width: isMobile ? “100%” : “360px”, flexShrink: 0,
-display: “flex”, flexDirection: “column”,
-background: “rgba(6,8,20,0.97)”,
-borderLeft: isMobile ? “none” : “1px solid rgba(99,102,241,0.18)”,
-borderTop: isMobile ? “1px solid rgba(99,102,241,0.18)” : “none”,
-height: isMobile ? “58vh” : “auto”,
-position: isMobile ? “absolute” : “relative”,
-bottom: isMobile ? 0 : undefined,
-left: isMobile ? 0 : undefined,
-right: isMobile ? 0 : undefined,
-zIndex: 30,
-}}>
-<div style={{ padding: “11px 16px”, borderBottom: “1px solid rgba(99,102,241,0.12)”, display: “flex”, alignItems: “center”, gap: “8px”, flexShrink: 0 }}>
-<div style={{ width: “7px”, height: “7px”, borderRadius: “50%”, background: “#34D399”, boxShadow: “0 0 8px #34D399” }} />
-<span style={{ fontSize: “11px”, fontWeight: 500, color: “#94a3b8”, letterSpacing: “0.06em” }}>
-PAPER GUIDE{paper.meta?.arxivId ? ` · arXiv:${paper.meta.arxivId}` : “”}
-</span>
-{isMobile && (
-<button onClick={() => setShowChat(false)} style={{ marginLeft: “auto”, background: “none”, border: “none”, color: “#64748b”, cursor: “pointer”, fontSize: “20px”, lineHeight: 1 }}>✕</button>
-)}
-</div>
-
-```
-  <div style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch", padding: "16px" }}>
-    {messages.map((m, i) => (
-      <div key={i} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: "10px" }}>
-        <div style={{
-          maxWidth: "88%", padding: "10px 14px",
-          borderRadius: m.role === "user" ? "18px 18px 4px 18px" : "4px 18px 18px 18px",
-          background: m.role === "user" ? "linear-gradient(135deg,#1d4ed8,#2563eb)" : "rgba(28,32,52,0.95)",
-          border: m.role === "assistant" ? "1px solid rgba(99,102,241,0.2)" : "none",
-          color: "#e2e8f0", fontSize: "13px", lineHeight: "1.6", whiteSpace: "pre-wrap",
-        }}>{m.content}</div>
-      </div>
-    ))}
-    {chatLoading && (
-      <div style={{ display: "flex", gap: "5px", padding: "4px 0" }}>
-        {[0,1,2].map(i => <div key={i} style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#6366f1", animation: `kp 1.2s ease ${i*0.2}s infinite` }} />)}
-      </div>
-    )}
-    <div ref={chatEndRef} />
-  </div>
-
-  {messages.length <= 1 && (
-    <div style={{ padding: "0 16px 10px", display: "flex", flexWrap: "wrap", gap: "6px" }}>
-      {["Key result?", "Explain the method", "Main figures?", "Literature context?"].map(q => (
-        <button key={q} onClick={() => setInput(q)} style={{ padding: "5px 10px", borderRadius: "20px", border: "1px solid rgba(99,102,241,0.3)", background: "rgba(99,102,241,0.08)", color: "#a5b4fc", cursor: "pointer", fontSize: "11px" }}>{q}</button>
-      ))}
-    </div>
-  )}
-
-  <div style={{ padding: "10px 12px", borderTop: "1px solid rgba(99,102,241,0.12)", display: "flex", gap: "8px", flexShrink: 0 }}>
-    <input
-      value={input}
-      onChange={e => setInput(e.target.value)}
-      onKeyDown={e => e.key === "Enter" && sendMessage()}
-      placeholder="Ask about the paper…"
-      style={{ flex: 1, padding: "11px 16px", borderRadius: "24px", border: "1px solid rgba(99,102,241,0.28)", background: "rgba(12,15,36,0.9)", color: "#e2e8f0", fontSize: "16px", outline: "none" }}
-    />
-    <button
-      onClick={sendMessage}
-      disabled={chatLoading}
-      style={{ width: "44px", height: "44px", borderRadius: "50%", border: "none", background: chatLoading ? "#1e293b" : "linear-gradient(135deg,#4f46e5,#7c3aed)", color: "white", fontSize: "18px", cursor: chatLoading ? "not-allowed" : "pointer", flexShrink: 0, boxShadow: chatLoading ? "none" : "0 0 18px rgba(99,102,241,0.35)" }}
-    >↑</button>
-  </div>
-</div>
-```
-
-);
-
-return (
-<div style={{ display: “flex”, flexDirection: “column”, height: “100vh”, overflow: “hidden” }}>
-{paper && (
-<header style={{ display: “flex”, alignItems: “center”, padding: “10px 16px”, background: “rgba(10,12,28,0.98)”, borderBottom: “1px solid rgba(99,102,241,0.16)”, flexShrink: 0, gap: “12px”, zIndex: 40 }}>
-<div style={{ width: “3px”, height: “32px”, borderRadius: “2px”, background: “linear-gradient(to bottom,#6366f1,#8b5cf6)”, flexShrink: 0 }} />
-<div style={{ flex: 1, minWidth: 0 }}>
-<div style={{ fontSize: “13px”, fontWeight: 500, color: “#c7d2fe”, whiteSpace: “nowrap”, overflow: “hidden”, textOverflow: “ellipsis” }}>
-{paper.meta?.arxivId ? `arXiv:${paper.meta.arxivId}` : (paper.meta?.title || “Paper”)}
-</div>
-<div style={{ fontSize: “10px”, color: “#334155”, letterSpacing: “0.05em”, marginTop: “1px”, fontFamily: “monospace” }}>
-{paper.doc.numPages} pages · {paper.annotations.length > 0 ? “skim annotations active” : “generic skim mode”}
-</div>
-</div>
-<button onClick={() => { setPaper(null); setShowChat(false); }} style={{ …btn(false, “#64748b”), fontSize: “11px”, padding: “5px 10px” }}>↩{!isMobile && “ Open”}</button>
-<button onClick={() => setSkimMode(m => !m)} style={btn(skimMode, “#34D399”)}>
-<span>{skimMode ? “✏️” : “📄”}</span>
-{!isMobile && <span>{skimMode ? “Skim” : “Full”}</span>}
-</button>
-<button onClick={() => setShowChat(c => !c)} style={btn(showChat, “#a5b4fc”)}>
-<span>💬</span>
-{!isMobile && <span>Guide</span>}
-</button>
-</header>
-)}
-
-```
-  <div style={{ display: "flex", flex: 1, overflow: "hidden", position: "relative" }}>
-    <div style={{
-      flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch",
-      padding: paper ? (isMobile ? "16px 12px" : "24px 32px") : "0",
-      display: "flex", flexDirection: "column", alignItems: "center",
-      background: "radial-gradient(ellipse at 50% 0%,rgba(28,32,65,0.4) 0%,#080a16 65%)",
-    }}>
-      {!paper && <LoadScreen onLoad={handlePaperLoaded} />}
-      {paper && (
-        <div style={{ width: "100%", maxWidth: "680px" }}>
-          {Array.from({ length: paper.doc.numPages }, (_, i) => (
-            <PdfPage key={i+1} pdfDoc={paper.doc} pageNum={i+1} skimMode={skimMode} annotations={paper.annotations} />
-          ))}
-        </div>
-      )}
-    </div>
-    {showChat && paper && chatPanel}
-  </div>
-</div>
-```
-
-);
-}
-
-ReactDOM.createRoot(document.getElementById(“root”)).render(<App />);
+// ── Initial render ────────────────────────────────────────────────────────────
+render();
 </script>
-
 </body>
 </html>
