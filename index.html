@@ -175,6 +175,7 @@ var state = {
   input: "",
   chatLoading: false,
   isMobile: window.innerWidth < 700,
+  apiKey: localStorage.getItem("anthropic_api_key") || "",
   // load screen state
   urlInput: "2210.05140",
   loadStatus: null,
@@ -251,6 +252,34 @@ function renderLoadScreen() {
   container.appendChild(el("p", { style: {
     fontSize: "12px", color: "#475569", margin: "0 0 28px",
   } }, "arXiv ID \u00B7 abstract URL \u00B7 PDF URL \u00B7 or upload"));
+
+  // API key input
+  var keyRow = el("div", { style: { width: "100%", maxWidth: "340px", marginBottom: "18px" } });
+  var keyLabel = el("div", { style: {
+    fontSize: "10px", color: "#475569", marginBottom: "5px", letterSpacing: "0.08em",
+    textAlign: "left",
+  } }, "ANTHROPIC API KEY" + (state.apiKey ? "  \u2713" : ""));
+  var keyField = el("input", {
+    type: "password",
+    value: state.apiKey,
+    placeholder: "sk-ant-\u2026",
+    onInput: function(e) {
+      state.apiKey = e.target.value;
+      localStorage.setItem("anthropic_api_key", e.target.value);
+    },
+    style: {
+      width: "100%", padding: "9px 14px", borderRadius: "8px",
+      border: "1px solid " + (state.apiKey ? "rgba(52,211,153,0.4)" : "rgba(99,102,241,0.25)"),
+      background: "rgba(12,15,36,0.9)", color: "#e2e8f0", fontSize: "13px",
+      outline: "none", fontFamily: "monospace",
+    },
+  });
+  keyRow.appendChild(keyLabel);
+  keyRow.appendChild(keyField);
+  keyRow.appendChild(el("div", { style: {
+    fontSize: "10px", color: "#334155", marginTop: "4px", textAlign: "left",
+  } }, "Stored in browser only. Needed for AI chat."));
+  container.appendChild(keyRow);
 
   // Input row
   var inputRow = el("div", { style: { width: "100%", maxWidth: "340px", marginBottom: "10px" } });
@@ -657,8 +686,18 @@ function handlePaperLoaded(p) {
   render();
 }
 
+var API_PROXIES = [
+  function(u) { return "https://corsproxy.io/?url=" + encodeURIComponent(u); },
+  function(u) { return "https://api.allorigins.win/raw?url=" + encodeURIComponent(u); },
+];
+
 function sendMessage() {
   if (!state.input.trim() || state.chatLoading || !state.paper) return;
+  if (!state.apiKey) {
+    state.messages.push({ role: "assistant", content: "Please enter your Anthropic API key on the load screen first. (Use the \u21A9 Open button to go back.)" });
+    render();
+    return;
+  }
   var userMsg = { role: "user", content: state.input.trim() };
   state.messages.push(userMsg);
   state.input = "";
@@ -666,26 +705,65 @@ function sendMessage() {
   render();
 
   var msgPayload = state.messages.map(function(m) { return { role: m.role, content: m.content }; });
-  fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1000,
-      system: state.paper.systemPrompt,
-      messages: msgPayload,
-    }),
-  }).then(function(res) {
-    return res.json();
-  }).then(function(data) {
-    state.messages.push({ role: "assistant", content: (data.content && data.content[0] && data.content[0].text) || "No response." });
-    state.chatLoading = false;
-    render();
-  }).catch(function() {
-    state.messages.push({ role: "assistant", content: "Connection error. Please try again." });
-    state.chatLoading = false;
-    render();
+  var apiUrl = "https://api.anthropic.com/v1/messages";
+  var bodyStr = JSON.stringify({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 1000,
+    system: state.paper.systemPrompt,
+    messages: msgPayload,
   });
+
+  // Try direct first, then CORS proxies
+  var attempts = [
+    function() {
+      return fetch(apiUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": state.apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: bodyStr,
+      });
+    },
+  ];
+  API_PROXIES.forEach(function(proxy) {
+    attempts.push(function() {
+      return fetch(proxy(apiUrl), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": state.apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: bodyStr,
+      });
+    });
+  });
+
+  function tryAttempt(idx) {
+    if (idx >= attempts.length) {
+      state.messages.push({ role: "assistant", content: "Connection error. Check your API key and try again." });
+      state.chatLoading = false;
+      render();
+      return;
+    }
+    attempts[idx]().then(function(res) {
+      return res.json().then(function(data) {
+        if (data.error) {
+          state.messages.push({ role: "assistant", content: "API error: " + (data.error.message || JSON.stringify(data.error)) });
+        } else {
+          state.messages.push({ role: "assistant", content: (data.content && data.content[0] && data.content[0].text) || "No response." });
+        }
+        state.chatLoading = false;
+        render();
+      });
+    }).catch(function() {
+      tryAttempt(idx + 1);
+    });
+  }
+  tryAttempt(0);
 }
 
 // ── Responsive listener ───────────────────────────────────────────────────────
