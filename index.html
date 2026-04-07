@@ -175,7 +175,11 @@ var state = {
   input: "",
   chatLoading: false,
   isMobile: window.innerWidth < 700,
+  // AI provider settings
+  provider: localStorage.getItem("ai_provider") || "anthropic",
   apiKey: localStorage.getItem("anthropic_api_key") || "",
+  ollamaUrl: localStorage.getItem("ollama_url") || "http://localhost:11434",
+  ollamaModel: localStorage.getItem("ollama_model") || "gemma3:4b",
   // load screen state
   urlInput: "2210.05140",
   loadStatus: null,
@@ -253,33 +257,77 @@ function renderLoadScreen() {
     fontSize: "12px", color: "#475569", margin: "0 0 28px",
   } }, "arXiv ID \u00B7 abstract URL \u00B7 PDF URL \u00B7 or upload"));
 
-  // API key input
-  var keyRow = el("div", { style: { width: "100%", maxWidth: "340px", marginBottom: "18px" } });
-  var keyLabel = el("div", { style: {
-    fontSize: "10px", color: "#475569", marginBottom: "5px", letterSpacing: "0.08em",
-    textAlign: "left",
-  } }, "ANTHROPIC API KEY" + (state.apiKey ? "  \u2713" : ""));
-  var keyField = el("input", {
-    type: "password",
-    value: state.apiKey,
-    placeholder: "sk-ant-\u2026",
-    onInput: function(e) {
-      state.apiKey = e.target.value;
-      localStorage.setItem("anthropic_api_key", e.target.value);
-    },
-    style: {
-      width: "100%", padding: "9px 14px", borderRadius: "8px",
-      border: "1px solid " + (state.apiKey ? "rgba(52,211,153,0.4)" : "rgba(99,102,241,0.25)"),
-      background: "rgba(12,15,36,0.9)", color: "#e2e8f0", fontSize: "13px",
-      outline: "none", fontFamily: "monospace",
-    },
+  // Provider toggle
+  var providerRow = el("div", { style: { width: "100%", maxWidth: "340px", marginBottom: "14px" } });
+  var providerLabel = el("div", { style: {
+    fontSize: "10px", color: "#475569", marginBottom: "6px", letterSpacing: "0.08em", textAlign: "left",
+  } }, "AI PROVIDER");
+  providerRow.appendChild(providerLabel);
+  var toggleWrap = el("div", { style: { display: "flex", gap: "0", borderRadius: "8px", overflow: "hidden", border: "1px solid rgba(99,102,241,0.25)" } });
+  ["anthropic", "ollama"].forEach(function(p) {
+    var active = state.provider === p;
+    var label = p === "anthropic" ? "Anthropic" : "Ollama (local)";
+    toggleWrap.appendChild(el("button", {
+      onClick: function() { state.provider = p; localStorage.setItem("ai_provider", p); render(); },
+      style: {
+        flex: "1", padding: "8px 0", border: "none", fontSize: "12px", fontWeight: "500",
+        cursor: "pointer", transition: "all 0.2s",
+        background: active ? "rgba(99,102,241,0.2)" : "rgba(12,15,36,0.9)",
+        color: active ? "#a5b4fc" : "#475569",
+      },
+    }, label));
   });
-  keyRow.appendChild(keyLabel);
-  keyRow.appendChild(keyField);
-  keyRow.appendChild(el("div", { style: {
-    fontSize: "10px", color: "#334155", marginTop: "4px", textAlign: "left",
-  } }, "Stored in browser only. Needed for AI chat."));
-  container.appendChild(keyRow);
+  providerRow.appendChild(toggleWrap);
+  container.appendChild(providerRow);
+
+  // Provider-specific config
+  var configRow = el("div", { style: { width: "100%", maxWidth: "340px", marginBottom: "18px" } });
+  if (state.provider === "anthropic") {
+    var keyLabel = el("div", { style: {
+      fontSize: "10px", color: "#475569", marginBottom: "5px", letterSpacing: "0.08em", textAlign: "left",
+    } }, "API KEY" + (state.apiKey ? "  \u2713" : ""));
+    configRow.appendChild(keyLabel);
+    configRow.appendChild(el("input", {
+      type: "password", value: state.apiKey, placeholder: "sk-ant-\u2026",
+      onInput: function(e) { state.apiKey = e.target.value; localStorage.setItem("anthropic_api_key", e.target.value); },
+      style: {
+        width: "100%", padding: "9px 14px", borderRadius: "8px",
+        border: "1px solid " + (state.apiKey ? "rgba(52,211,153,0.4)" : "rgba(99,102,241,0.25)"),
+        background: "rgba(12,15,36,0.9)", color: "#e2e8f0", fontSize: "13px",
+        outline: "none", fontFamily: "monospace",
+      },
+    }));
+    configRow.appendChild(el("div", { style: { fontSize: "10px", color: "#334155", marginTop: "4px", textAlign: "left" } }, "Stored in browser only."));
+  } else {
+    var urlLabel = el("div", { style: {
+      fontSize: "10px", color: "#475569", marginBottom: "5px", letterSpacing: "0.08em", textAlign: "left",
+    } }, "OLLAMA URL");
+    configRow.appendChild(urlLabel);
+    configRow.appendChild(el("input", {
+      value: state.ollamaUrl, placeholder: "http://localhost:11434",
+      onInput: function(e) { state.ollamaUrl = e.target.value; localStorage.setItem("ollama_url", e.target.value); },
+      style: {
+        width: "100%", padding: "9px 14px", borderRadius: "8px", marginBottom: "8px",
+        border: "1px solid rgba(99,102,241,0.25)", background: "rgba(12,15,36,0.9)",
+        color: "#e2e8f0", fontSize: "13px", outline: "none", fontFamily: "monospace",
+      },
+    }));
+    var modelLabel = el("div", { style: {
+      fontSize: "10px", color: "#475569", marginBottom: "5px", letterSpacing: "0.08em", textAlign: "left",
+    } }, "MODEL");
+    configRow.appendChild(modelLabel);
+    configRow.appendChild(el("input", {
+      value: state.ollamaModel, placeholder: "gemma3:4b",
+      onInput: function(e) { state.ollamaModel = e.target.value; localStorage.setItem("ollama_model", e.target.value); },
+      style: {
+        width: "100%", padding: "9px 14px", borderRadius: "8px",
+        border: "1px solid rgba(99,102,241,0.25)", background: "rgba(12,15,36,0.9)",
+        color: "#e2e8f0", fontSize: "13px", outline: "none", fontFamily: "monospace",
+      },
+    }));
+    configRow.appendChild(el("div", { style: { fontSize: "10px", color: "#334155", marginTop: "4px", textAlign: "left" } }, "Runs locally via Ollama. No API key needed."));
+  }
+  container.appendChild(configRow);
 
   // Input row
   var inputRow = el("div", { style: { width: "100%", maxWidth: "340px", marginBottom: "10px" } });
@@ -421,7 +469,7 @@ function renderChatPanel() {
   } }));
   headerRow.appendChild(el("span", { style: {
     fontSize: "11px", fontWeight: "500", color: "#94a3b8", letterSpacing: "0.06em",
-  } }, "PAPER GUIDE" + (paper.meta && paper.meta.arxivId ? " \u00B7 arXiv:" + paper.meta.arxivId : "")));
+  } }, "PAPER GUIDE" + (paper.meta && paper.meta.arxivId ? " \u00B7 arXiv:" + paper.meta.arxivId : "") + " \u00B7 " + (state.provider === "ollama" ? state.ollamaModel : "claude")));
   if (isMobile) {
     var closeBtn = el("button", {
       onClick: function() { state.showChat = false; render(); },
@@ -691,20 +739,7 @@ var API_PROXIES = [
   function(u) { return "https://api.allorigins.win/raw?url=" + encodeURIComponent(u); },
 ];
 
-function sendMessage() {
-  if (!state.input.trim() || state.chatLoading || !state.paper) return;
-  if (!state.apiKey) {
-    state.messages.push({ role: "assistant", content: "Please enter your Anthropic API key on the load screen first. (Use the \u21A9 Open button to go back.)" });
-    render();
-    return;
-  }
-  var userMsg = { role: "user", content: state.input.trim() };
-  state.messages.push(userMsg);
-  state.input = "";
-  state.chatLoading = true;
-  render();
-
-  var msgPayload = state.messages.map(function(m) { return { role: m.role, content: m.content }; });
+function sendViaAnthropic(msgPayload) {
   var apiUrl = "https://api.anthropic.com/v1/messages";
   var bodyStr = JSON.stringify({
     model: "claude-sonnet-4-20250514",
@@ -713,7 +748,6 @@ function sendMessage() {
     messages: msgPayload,
   });
 
-  // Try direct first, then CORS proxies
   var attempts = [
     function() {
       return fetch(apiUrl, {
@@ -743,27 +777,66 @@ function sendMessage() {
   });
 
   function tryAttempt(idx) {
-    if (idx >= attempts.length) {
-      state.messages.push({ role: "assistant", content: "Connection error. Check your API key and try again." });
-      state.chatLoading = false;
-      render();
-      return;
-    }
-    attempts[idx]().then(function(res) {
+    if (idx >= attempts.length) return Promise.reject(new Error("Connection error. Check your API key and try again."));
+    return attempts[idx]().then(function(res) {
       return res.json().then(function(data) {
-        if (data.error) {
-          state.messages.push({ role: "assistant", content: "API error: " + (data.error.message || JSON.stringify(data.error)) });
-        } else {
-          state.messages.push({ role: "assistant", content: (data.content && data.content[0] && data.content[0].text) || "No response." });
-        }
-        state.chatLoading = false;
-        render();
+        if (data.error) return Promise.reject(new Error("API error: " + (data.error.message || JSON.stringify(data.error))));
+        return (data.content && data.content[0] && data.content[0].text) || "No response.";
       });
-    }).catch(function() {
-      tryAttempt(idx + 1);
+    }).catch(function(err) {
+      if (err.message && err.message.indexOf("API error") === 0) return Promise.reject(err);
+      return tryAttempt(idx + 1);
     });
   }
-  tryAttempt(0);
+  return tryAttempt(0);
+}
+
+function sendViaOllama(msgPayload) {
+  var url = state.ollamaUrl.replace(/\/+$/, "") + "/v1/chat/completions";
+  var ollamaMsgs = [{ role: "system", content: state.paper.systemPrompt }].concat(msgPayload);
+  return fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: state.ollamaModel,
+      messages: ollamaMsgs,
+    }),
+  }).then(function(res) {
+    return res.json().then(function(data) {
+      if (data.error) return Promise.reject(new Error("Ollama error: " + (data.error.message || JSON.stringify(data.error))));
+      return (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "No response.";
+    });
+  }).catch(function(err) {
+    if (err.message && err.message.indexOf("Ollama error") === 0) return Promise.reject(err);
+    return Promise.reject(new Error("Cannot reach Ollama at " + state.ollamaUrl + ". Is it running?"));
+  });
+}
+
+function sendMessage() {
+  if (!state.input.trim() || state.chatLoading || !state.paper) return;
+  if (state.provider === "anthropic" && !state.apiKey) {
+    state.messages.push({ role: "assistant", content: "Please enter your Anthropic API key on the load screen first. (Use the \u21A9 Open button to go back.)" });
+    render();
+    return;
+  }
+  var userMsg = { role: "user", content: state.input.trim() };
+  state.messages.push(userMsg);
+  state.input = "";
+  state.chatLoading = true;
+  render();
+
+  var msgPayload = state.messages.map(function(m) { return { role: m.role, content: m.content }; });
+  var sendFn = state.provider === "ollama" ? sendViaOllama : sendViaAnthropic;
+
+  sendFn(msgPayload).then(function(text) {
+    state.messages.push({ role: "assistant", content: text });
+    state.chatLoading = false;
+    render();
+  }).catch(function(err) {
+    state.messages.push({ role: "assistant", content: err.message || "Connection error." });
+    state.chatLoading = false;
+    render();
+  });
 }
 
 // ── Responsive listener ───────────────────────────────────────────────────────
